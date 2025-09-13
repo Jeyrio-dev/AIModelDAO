@@ -17,3 +17,49 @@
 (define-data-var min-proposal-stake uint u1000)
 (define-data-var quorum-threshold uint u30)
 (define-data-var voting-period uint u1440)
+
+(define-map proposals
+  { proposal-id: uint }
+  {
+    title: (string-ascii 100),
+    description: (string-ascii 500),
+    creator: principal,
+    votes-for: uint,
+    votes-against: uint,
+    end-block: uint,
+    executed: bool,
+    proposal-type: (string-ascii 30),
+    funding-amount: uint,
+    target-address: (optional principal)
+  }
+)
+
+(define-map votes
+  { proposal-id: uint, voter: principal }
+  { voted: bool, vote-type: bool, voting-power: uint }
+)
+
+(define-map dao-tokens
+  { holder: principal }
+  { balance: uint, staked: uint, last-claim: uint }
+)
+
+(define-map delegations
+  { delegator: principal }
+  { delegate: principal, voting-power: uint }
+)
+
+(define-map proposal-stakes
+  { proposal-id: uint }
+  { stake-amount: uint, stake-returned: bool }
+)
+
+(define-map governance-settings
+  { setting: (string-ascii 30) }
+  { value: uint }
+)
+
+(define-map member-roles
+  { member: principal }
+  { role: (string-ascii 20), permissions: uint }
+)
