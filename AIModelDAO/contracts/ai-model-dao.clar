@@ -11,12 +11,19 @@
 (define-constant ERR-INVALID-DELEGATE (err u106))
 (define-constant ERR-TREASURY-INSUFFICIENT (err u107))
 (define-constant ERR-MIN-STAKE-REQUIRED (err u108))
+(define-constant ERR-INVALID-MODEL-PARAMS (err u109))
+(define-constant ERR-COOLDOWN-ACTIVE (err u110))
+(define-constant ERR-INVALID-REWARD (err u111))
+(define-constant ERR-INSUFFICIENT-REPUTATION (err u112))
 
 (define-data-var proposal-count uint u0)
 (define-data-var treasury-balance uint u0)
 (define-data-var min-proposal-stake uint u1000)
 (define-data-var quorum-threshold uint u30)
 (define-data-var voting-period uint u1440)
+(define-data-var reward-pool uint u0)
+(define-data-var total-staked uint u0)
+(define-data-var governance-fee uint u10)
 
 (define-map proposals
   { proposal-id: uint }
@@ -30,23 +37,25 @@
     executed: bool,
     proposal-type: (string-ascii 30),
     funding-amount: uint,
-    target-address: (optional principal)
+    target-address: (optional principal),
+    model-params: (string-ascii 200),
+    priority: uint
   }
 )
 
 (define-map votes
   { proposal-id: uint, voter: principal }
-  { voted: bool, vote-type: bool, voting-power: uint }
+  { voted: bool, vote-type: bool, voting-power: uint, timestamp: uint }
 )
 
 (define-map dao-tokens
   { holder: principal }
-  { balance: uint, staked: uint, last-claim: uint }
+  { balance: uint, staked: uint, last-claim: uint, reputation: uint }
 )
 
 (define-map delegations
   { delegator: principal }
-  { delegate: principal, voting-power: uint }
+  { delegate: principal, voting-power: uint, expiry: uint }
 )
 
 (define-map proposal-stakes
@@ -61,5 +70,21 @@
 
 (define-map member-roles
   { member: principal }
-  { role: (string-ascii 20), permissions: uint }
+  { role: (string-ascii 20), permissions: uint, reputation-bonus: uint }
+)
+
+(define-map model-configurations
+  { config-id: uint }
+  {
+    name: (string-ascii 50),
+    parameters: (string-ascii 300),
+    performance-metrics: uint,
+    active: bool,
+    creator: principal
+  }
+)
+
+(define-map voting-rewards
+  { voter: principal, period: uint }
+  { rewards-earned: uint, claimed: bool }
 )
