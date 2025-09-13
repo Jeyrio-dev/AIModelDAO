@@ -300,3 +300,96 @@
     (ok true)
   )
 )
+
+(define-public (register-model-config (name (string-ascii 50)) (parameters (string-ascii 300)))
+  (let
+    (
+      (config-id (+ (var-get proposal-count) u1))
+      (creator-reputation (get reputation (get-token-balance tx-sender)))
+    )
+    (asserts! (>= creator-reputation u25) ERR-INSUFFICIENT-REPUTATION)
+    
+    (map-set model-configurations { config-id: config-id }
+      {
+        name: name,
+        parameters: parameters,
+        performance-metrics: u0,
+        active: false,
+        creator: tx-sender
+      })
+    
+    (try! (update-reputation tx-sender u3))
+    (ok config-id)
+  )
+)
+
+(define-public (update-model-performance (config-id uint) (metrics uint))
+  (let
+    (
+      (config (unwrap! (map-get? model-configurations { config-id: config-id }) ERR-INVALID-MODEL-PARAMS))
+      (sender-role (get role (get-member-role tx-sender)))
+    )
+    (asserts! (or (is-eq (get creator config) tx-sender) 
+                  (is-eq sender-role "admin")) ERR-NOT-AUTHORIZED)
+    
+    (map-set model-configurations { config-id: config-id }
+      (merge config { performance-metrics: metrics }))
+    
+    (if (> metrics u80)
+      (try! (distribute-model-reward (get creator config) u100))
+      (ok u0))
+  )
+)
+
+(define-public (activate-model (config-id uint))
+  (let
+    (
+      (config (unwrap! (map-get? model-configurations { config-id: config-id }) ERR-INVALID-MODEL-PARAMS))
+      (sender-role (get role (get-member-role tx-sender)))
+    )
+    (asserts! (is-eq sender-role "admin") ERR-NOT-AUTHORIZED)
+    (asserts! (> (get performance-metrics config) u70) ERR-INVALID-MODEL-PARAMS)
+    
+    (map-set model-configurations { config-id: config-id }
+      (merge config { active: true }))
+    
+    (try! (distribute-model-reward (get creator config) u500))
+    (ok true)
+  )
+)
+
+(define-public (claim-voting-rewards (period uint))
+  (let
+    (
+      (rewards (unwrap! (map-get? voting-rewards { voter: tx-sender, period: period }) ERR-INVALID-REWARD))
+      (reward-amount (get rewards-earned rewards))
+    )
+    (asserts! (not (get claimed rewards)) ERR-INVALID-REWARD)
+    (asserts! (>= (var-get reward-pool) reward-amount) ERR-TREASURY-INSUFFICIENT)
+    
+    (map-set voting-rewards { voter: tx-sender, period: period }
+      (merge rewards { claimed: true }))
+    
+    (var-set reward-pool (- (var-get reward-pool) reward-amount))
+    (try! (mint-tokens tx-sender reward-amount))
+    (ok reward-amount)
+  )
+)
+
+(define-public (distribute-staking-rewards)
+  (let
+    (
+      (sender-role (get role (get-member-role tx-sender)))
+      (total-rewards u10000)
+      (user-stake (get staked (get-token-balance tx-sender)))
+      (user-reward (/ (* user-stake total-rewards) (var-get total-staked)))
+    )
+    (asserts! (is-eq sender-role "admin") ERR-NOT-AUTHORIZED)
+    (asserts! (>= (var-get reward-pool) user-reward) ERR-TREASURY-INSUFFICIENT)
+    (asserts! (> user-stake u0) ERR-NOT-AUTHORIZED)
+    
+    (var-set reward-pool (- (var-get reward-pool) user-reward))
+    (try! (mint-tokens tx-sender user-reward))
+    (ok user-reward)
+  )
+)
