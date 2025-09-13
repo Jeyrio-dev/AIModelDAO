@@ -88,3 +88,102 @@
   { voter: principal, period: uint }
   { rewards-earned: uint, claimed: bool }
 )
+
+(define-public (initialize)
+  (begin
+    (map-set dao-tokens { holder: CONTRACT-OWNER } { balance: u1000000, staked: u0, last-claim: block-height, reputation: u100 })
+    (map-set governance-settings { setting: "min-stake" } { value: u1000 })
+    (map-set governance-settings { setting: "quorum" } { value: u30 })
+    (map-set governance-settings { setting: "voting-period" } { value: u1440 })
+    (map-set governance-settings { setting: "cooldown-period" } { value: u144 })
+    (map-set member-roles { member: CONTRACT-OWNER } { role: "admin", permissions: u255, reputation-bonus: u50 })
+    (var-set treasury-balance u500000)
+    (var-set reward-pool u100000)
+    (ok true)
+  )
+)
+
+(define-public (mint-tokens (recipient principal) (amount uint))
+  (let
+    (
+      (current-balance (get balance (get-token-balance recipient)))
+      (sender-role (get role (get-member-role tx-sender)))
+    )
+    (asserts! (is-eq sender-role "admin") ERR-NOT-AUTHORIZED)
+    (map-set dao-tokens 
+      { holder: recipient }
+      { 
+        balance: (+ current-balance amount),
+        staked: (get staked (get-token-balance recipient)),
+        last-claim: block-height,
+        reputation: (get reputation (get-token-balance recipient))
+      })
+    (ok amount)
+  )
+)
+
+(define-public (transfer-tokens (recipient principal) (amount uint))
+  (let
+    (
+      (sender-balance (get balance (get-token-balance tx-sender)))
+    )
+    (asserts! (>= sender-balance amount) ERR-NOT-AUTHORIZED)
+    (map-set dao-tokens { holder: tx-sender }
+      {
+        balance: (- sender-balance amount),
+        staked: (get staked (get-token-balance tx-sender)),
+        last-claim: (get last-claim (get-token-balance tx-sender)),
+        reputation: (get reputation (get-token-balance tx-sender))
+      })
+    (map-set dao-tokens { holder: recipient }
+      {
+        balance: (+ (get balance (get-token-balance recipient)) amount),
+        staked: (get staked (get-token-balance recipient)),
+        last-claim: (get last-claim (get-token-balance recipient)),
+        reputation: (get reputation (get-token-balance recipient))
+      })
+    (ok amount)
+  )
+)
+
+(define-public (stake-tokens (amount uint))
+  (let
+    (
+      (current-balance (get balance (get-token-balance tx-sender)))
+      (current-stake (get staked (get-token-balance tx-sender)))
+    )
+    (asserts! (>= current-balance amount) ERR-NOT-AUTHORIZED)
+    (map-set dao-tokens 
+      { holder: tx-sender }
+      { 
+        balance: (- current-balance amount),
+        staked: (+ current-stake amount),
+        last-claim: block-height,
+        reputation: (get reputation (get-token-balance tx-sender))
+      })
+    (var-set total-staked (+ (var-get total-staked) amount))
+    (ok true)
+  )
+)
+
+(define-public (unstake-tokens (amount uint))
+  (let
+    (
+      (current-stake (get staked (get-token-balance tx-sender)))
+      (current-balance (get balance (get-token-balance tx-sender)))
+      (last-claim (get last-claim (get-token-balance tx-sender)))
+    )
+    (asserts! (>= current-stake amount) ERR-NOT-AUTHORIZED)
+    (asserts! (> (- block-height last-claim) u144) ERR-COOLDOWN-ACTIVE)
+    (map-set dao-tokens 
+      { holder: tx-sender }
+      { 
+        balance: (+ current-balance amount),
+        staked: (- current-stake amount),
+        last-claim: block-height,
+        reputation: (get reputation (get-token-balance tx-sender))
+      })
+    (var-set total-staked (- (var-get total-staked) amount))
+    (ok true)
+  )
+)
