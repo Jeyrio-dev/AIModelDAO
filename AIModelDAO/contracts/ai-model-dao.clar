@@ -1,30 +1,484 @@
+;; AIModelDAO - Decentralized AI Model Governance
+;; Allows token holders to vote on AI model parameters and funding
 
-;; title: ai-model-dao
-;; version:
-;; summary:
-;; description:
+(define-constant CONTRACT-OWNER tx-sender)
+(define-constant ERR-NOT-AUTHORIZED (err u100))
+(define-constant ERR-INVALID-PROPOSAL (err u101))
+(define-constant ERR-ALREADY-VOTED (err u102))
+(define-constant ERR-VOTING-CLOSED (err u103))
+(define-constant ERR-INSUFFICIENT-QUORUM (err u104))
+(define-constant ERR-PROPOSAL-EXECUTED (err u105))
+(define-constant ERR-INVALID-DELEGATE (err u106))
+(define-constant ERR-TREASURY-INSUFFICIENT (err u107))
+(define-constant ERR-MIN-STAKE-REQUIRED (err u108))
+(define-constant ERR-INVALID-MODEL-PARAMS (err u109))
+(define-constant ERR-COOLDOWN-ACTIVE (err u110))
+(define-constant ERR-INVALID-REWARD (err u111))
+(define-constant ERR-INSUFFICIENT-REPUTATION (err u112))
 
-;; traits
-;;
+(define-data-var proposal-count uint u0)
+(define-data-var treasury-balance uint u0)
+(define-data-var min-proposal-stake uint u1000)
+(define-data-var quorum-threshold uint u30)
+(define-data-var voting-period uint u1440)
+(define-data-var reward-pool uint u0)
+(define-data-var total-staked uint u0)
+(define-data-var governance-fee uint u10)
 
-;; token definitions
-;;
+(define-map proposals
+  { proposal-id: uint }
+  {
+    title: (string-ascii 100),
+    description: (string-ascii 500),
+    creator: principal,
+    votes-for: uint,
+    votes-against: uint,
+    end-block: uint,
+    executed: bool,
+    proposal-type: (string-ascii 30),
+    funding-amount: uint,
+    target-address: (optional principal),
+    model-params: (string-ascii 200),
+    priority: uint
+  }
+)
 
-;; constants
-;;
+(define-map votes
+  { proposal-id: uint, voter: principal }
+  { voted: bool, vote-type: bool, voting-power: uint, timestamp: uint }
+)
 
-;; data vars
-;;
+(define-map dao-tokens
+  { holder: principal }
+  { balance: uint, staked: uint, last-claim: uint, reputation: uint }
+)
 
-;; data maps
-;;
+(define-map delegations
+  { delegator: principal }
+  { delegate: principal, voting-power: uint, expiry: uint }
+)
 
-;; public functions
-;;
+(define-map proposal-stakes
+  { proposal-id: uint }
+  { stake-amount: uint, stake-returned: bool }
+)
 
-;; read only functions
-;;
+(define-map governance-settings
+  { setting: (string-ascii 30) }
+  { value: uint }
+)
 
-;; private functions
-;;
+(define-map member-roles
+  { member: principal }
+  { role: (string-ascii 20), permissions: uint, reputation-bonus: uint }
+)
 
+(define-map model-configurations
+  { config-id: uint }
+  {
+    name: (string-ascii 50),
+    parameters: (string-ascii 300),
+    performance-metrics: uint,
+    active: bool,
+    creator: principal
+  }
+)
+
+(define-map voting-rewards
+  { voter: principal, period: uint }
+  { rewards-earned: uint, claimed: bool }
+)
+
+(define-public (initialize)
+  (begin
+    (map-set dao-tokens { holder: CONTRACT-OWNER } { balance: u1000000, staked: u0, last-claim: stacks-block-height, reputation: u100 })
+    (map-set governance-settings { setting: "min-stake" } { value: u1000 })
+    (map-set governance-settings { setting: "quorum" } { value: u30 })
+    (map-set governance-settings { setting: "voting-period" } { value: u1440 })
+    (map-set governance-settings { setting: "cooldown-period" } { value: u144 })
+    (map-set member-roles { member: CONTRACT-OWNER } { role: "admin", permissions: u255, reputation-bonus: u50 })
+    (var-set treasury-balance u500000)
+    (var-set reward-pool u100000)
+    (ok true)
+  )
+)
+
+(define-public (mint-tokens (recipient principal) (amount uint))
+  (let
+    (
+      (current-balance (get balance (get-token-balance recipient)))
+      (sender-role (get role (get-member-role tx-sender)))
+    )
+    (asserts! (is-eq sender-role "admin") ERR-NOT-AUTHORIZED)
+    (map-set dao-tokens 
+      { holder: recipient }
+      { 
+        balance: (+ current-balance amount),
+        staked: (get staked (get-token-balance recipient)),
+        last-claim: stacks-block-height,
+        reputation: (get reputation (get-token-balance recipient))
+      })
+    (ok amount)
+  )
+)
+
+(define-public (transfer-tokens (recipient principal) (amount uint))
+  (let
+    (
+      (sender-balance (get balance (get-token-balance tx-sender)))
+    )
+    (asserts! (>= sender-balance amount) ERR-NOT-AUTHORIZED)
+    (map-set dao-tokens { holder: tx-sender }
+      {
+        balance: (- sender-balance amount),
+        staked: (get staked (get-token-balance tx-sender)),
+        last-claim: (get last-claim (get-token-balance tx-sender)),
+        reputation: (get reputation (get-token-balance tx-sender))
+      })
+    (map-set dao-tokens { holder: recipient }
+      {
+        balance: (+ (get balance (get-token-balance recipient)) amount),
+        staked: (get staked (get-token-balance recipient)),
+        last-claim: (get last-claim (get-token-balance recipient)),
+        reputation: (get reputation (get-token-balance recipient))
+      })
+    (ok amount)
+  )
+)
+
+(define-public (stake-tokens (amount uint))
+  (let
+    (
+      (current-balance (get balance (get-token-balance tx-sender)))
+      (current-stake (get staked (get-token-balance tx-sender)))
+    )
+    (asserts! (>= current-balance amount) ERR-NOT-AUTHORIZED)
+    (map-set dao-tokens 
+      { holder: tx-sender }
+      { 
+        balance: (- current-balance amount),
+        staked: (+ current-stake amount),
+        last-claim: stacks-block-height,
+        reputation: (get reputation (get-token-balance tx-sender))
+      })
+    (var-set total-staked (+ (var-get total-staked) amount))
+    (ok true)
+  )
+)
+
+(define-public (unstake-tokens (amount uint))
+  (let
+    (
+      (current-stake (get staked (get-token-balance tx-sender)))
+      (current-balance (get balance (get-token-balance tx-sender)))
+      (last-claim (get last-claim (get-token-balance tx-sender)))
+    )
+    (asserts! (>= current-stake amount) ERR-NOT-AUTHORIZED)
+    (asserts! (> (- stacks-block-height last-claim) u144) ERR-COOLDOWN-ACTIVE)
+    (map-set dao-tokens 
+      { holder: tx-sender }
+      { 
+        balance: (+ current-balance amount),
+        staked: (- current-stake amount),
+        last-claim: stacks-block-height,
+        reputation: (get reputation (get-token-balance tx-sender))
+      })
+    (var-set total-staked (- (var-get total-staked) amount))
+    (ok true)
+  )
+)
+
+(define-public (create-proposal (title (string-ascii 100)) (description (string-ascii 500)) 
+                              (proposal-type (string-ascii 30)) (funding-amount uint) 
+                              (target-address (optional principal)) (model-params (string-ascii 200))
+                              (priority uint))
+  (let
+    (
+      (proposal-id (+ (var-get proposal-count) u1))
+      (stake-amount (var-get min-proposal-stake))
+      (creator-balance (get balance (get-token-balance tx-sender)))
+      (creator-reputation (get reputation (get-token-balance tx-sender)))
+    )
+    (asserts! (>= creator-balance stake-amount) ERR-MIN-STAKE-REQUIRED)
+    (asserts! (>= creator-reputation u10) ERR-INSUFFICIENT-REPUTATION)
+    (asserts! (<= funding-amount (var-get treasury-balance)) ERR-TREASURY-INSUFFICIENT)
+    
+    (map-set proposals { proposal-id: proposal-id }
+      {
+        title: title,
+        description: description,
+        creator: tx-sender,
+        votes-for: u0,
+        votes-against: u0,
+        end-block: (+ stacks-block-height (var-get voting-period)),
+        executed: false,
+        proposal-type: proposal-type,
+        funding-amount: funding-amount,
+        target-address: target-address,
+        model-params: model-params,
+        priority: priority
+      })
+    
+    (map-set proposal-stakes { proposal-id: proposal-id }
+      { stake-amount: stake-amount, stake-returned: false })
+    
+    (try! (transfer-tokens (as-contract tx-sender) stake-amount))
+    (var-set proposal-count proposal-id)
+    (ok proposal-id)
+  )
+)
+
+(define-public (vote-on-proposal (proposal-id uint) (vote-for bool))
+  (let
+    (
+      (proposal (unwrap! (map-get? proposals { proposal-id: proposal-id }) ERR-INVALID-PROPOSAL))
+      (voter-tokens (get-token-balance tx-sender))
+      (voting-power (calculate-voting-power tx-sender))
+      (has-voted (is-some (map-get? votes { proposal-id: proposal-id, voter: tx-sender })))
+    )
+    (asserts! (< stacks-block-height (get end-block proposal)) ERR-VOTING-CLOSED)
+    (asserts! (not has-voted) ERR-ALREADY-VOTED)
+    (asserts! (> voting-power u0) ERR-NOT-AUTHORIZED)
+    
+    (map-set votes { proposal-id: proposal-id, voter: tx-sender }
+      { voted: true, vote-type: vote-for, voting-power: voting-power, timestamp: stacks-block-height })
+    
+    (if vote-for
+      (map-set proposals { proposal-id: proposal-id }
+        (merge proposal { votes-for: (+ (get votes-for proposal) voting-power) }))
+      (map-set proposals { proposal-id: proposal-id }
+        (merge proposal { votes-against: (+ (get votes-against proposal) voting-power) })))
+    
+    (unwrap! (update-reputation tx-sender u1) ERR-NOT-AUTHORIZED)
+    (ok true)
+  )
+)
+
+(define-public (execute-proposal (proposal-id uint))
+  (let
+    (
+      (proposal (unwrap! (map-get? proposals { proposal-id: proposal-id }) ERR-INVALID-PROPOSAL))
+      (total-votes (+ (get votes-for proposal) (get votes-against proposal)))
+      (quorum-met (>= (* total-votes u100) (* (var-get total-staked) (var-get quorum-threshold))))
+      (proposal-passed (> (get votes-for proposal) (get votes-against proposal)))
+    )
+    (asserts! (>= stacks-block-height (get end-block proposal)) ERR-VOTING-CLOSED)
+    (asserts! (not (get executed proposal)) ERR-PROPOSAL-EXECUTED)
+    (asserts! quorum-met ERR-INSUFFICIENT-QUORUM)
+    (asserts! proposal-passed ERR-NOT-AUTHORIZED)
+    
+    (map-set proposals { proposal-id: proposal-id }
+      (merge proposal { executed: true }))
+    
+    (if (> (get funding-amount proposal) u0)
+      (begin
+        (var-set treasury-balance (- (var-get treasury-balance) (get funding-amount proposal)))
+        (if (is-some (get target-address proposal))
+          (try! (as-contract (stx-transfer? (get funding-amount proposal) 
+                                         tx-sender 
+                                         (unwrap-panic (get target-address proposal)))))
+          true))
+      true)
+    
+    (unwrap! (return-proposal-stake proposal-id) ERR-NOT-AUTHORIZED)
+    (unwrap! (update-reputation (get creator proposal) u5) ERR-NOT-AUTHORIZED)
+    (ok true)
+  )
+)
+
+(define-public (delegate-voting-power (delegate principal) (expiry-blocks uint))
+  (let
+    (
+      (delegator-tokens (get-token-balance tx-sender))
+      (voting-power (+ (get staked delegator-tokens) (/ (get balance delegator-tokens) u2)))
+    )
+    (asserts! (> voting-power u0) ERR-NOT-AUTHORIZED)
+    (asserts! (not (is-eq delegate tx-sender)) ERR-INVALID-DELEGATE)
+    
+    (map-set delegations { delegator: tx-sender }
+      { delegate: delegate, voting-power: voting-power, expiry: (+ stacks-block-height expiry-blocks) })
+    (ok true)
+  )
+)
+
+(define-public (register-model-config (name (string-ascii 50)) (parameters (string-ascii 300)))
+  (let
+    (
+      (config-id (+ (var-get proposal-count) u1))
+      (creator-reputation (get reputation (get-token-balance tx-sender)))
+    )
+    (asserts! (>= creator-reputation u25) ERR-INSUFFICIENT-REPUTATION)
+    
+    (map-set model-configurations { config-id: config-id }
+      {
+        name: name,
+        parameters: parameters,
+        performance-metrics: u0,
+        active: false,
+        creator: tx-sender
+      })
+    
+    (unwrap! (update-reputation tx-sender u3) ERR-NOT-AUTHORIZED)
+    (ok config-id)
+  )
+)
+
+(define-public (update-model-performance (config-id uint) (metrics uint))
+  (let
+    (
+      (config (unwrap! (map-get? model-configurations { config-id: config-id }) ERR-INVALID-MODEL-PARAMS))
+      (sender-role (get role (get-member-role tx-sender)))
+    )
+    (asserts! (or (is-eq (get creator config) tx-sender) 
+                  (is-eq sender-role "admin")) ERR-NOT-AUTHORIZED)
+    
+    (map-set model-configurations { config-id: config-id }
+      (merge config { performance-metrics: metrics }))
+    
+    (if (> metrics u80)
+      (unwrap! (distribute-model-reward (get creator config) u100) ERR-TREASURY-INSUFFICIENT)
+      u0)
+    (ok metrics)
+  )
+)
+
+(define-public (activate-model (config-id uint))
+  (let
+    (
+      (config (unwrap! (map-get? model-configurations { config-id: config-id }) ERR-INVALID-MODEL-PARAMS))
+      (sender-role (get role (get-member-role tx-sender)))
+    )
+    (asserts! (is-eq sender-role "admin") ERR-NOT-AUTHORIZED)
+    (asserts! (> (get performance-metrics config) u70) ERR-INVALID-MODEL-PARAMS)
+    
+    (map-set model-configurations { config-id: config-id }
+      (merge config { active: true }))
+    
+    (unwrap! (distribute-model-reward (get creator config) u500) ERR-TREASURY-INSUFFICIENT)
+    (ok true)
+  )
+)
+
+(define-public (claim-voting-rewards (period uint))
+  (let
+    (
+      (rewards (unwrap! (map-get? voting-rewards { voter: tx-sender, period: period }) ERR-INVALID-REWARD))
+      (reward-amount (get rewards-earned rewards))
+    )
+    (asserts! (not (get claimed rewards)) ERR-INVALID-REWARD)
+    (asserts! (>= (var-get reward-pool) reward-amount) ERR-TREASURY-INSUFFICIENT)
+    
+    (map-set voting-rewards { voter: tx-sender, period: period }
+      (merge rewards { claimed: true }))
+    
+    (var-set reward-pool (- (var-get reward-pool) reward-amount))
+    (try! (mint-tokens tx-sender reward-amount))
+    (ok reward-amount)
+  )
+)
+
+(define-public (distribute-staking-rewards)
+  (let
+    (
+      (sender-role (get role (get-member-role tx-sender)))
+      (total-rewards u10000)
+      (user-stake (get staked (get-token-balance tx-sender)))
+      (user-reward (/ (* user-stake total-rewards) (var-get total-staked)))
+    )
+    (asserts! (is-eq sender-role "admin") ERR-NOT-AUTHORIZED)
+    (asserts! (>= (var-get reward-pool) user-reward) ERR-TREASURY-INSUFFICIENT)
+    (asserts! (> user-stake u0) ERR-NOT-AUTHORIZED)
+    
+    (var-set reward-pool (- (var-get reward-pool) user-reward))
+    (try! (mint-tokens tx-sender user-reward))
+    (ok user-reward)
+  )
+)
+
+(define-read-only (get-token-balance (holder principal))
+  (default-to { balance: u0, staked: u0, last-claim: u0, reputation: u0 }
+              (map-get? dao-tokens { holder: holder }))
+)
+
+(define-read-only (get-proposal (proposal-id uint))
+  (map-get? proposals { proposal-id: proposal-id })
+)
+
+(define-read-only (get-vote (proposal-id uint) (voter principal))
+  (map-get? votes { proposal-id: proposal-id, voter: voter })
+)
+
+(define-read-only (get-member-role (member principal))
+  (default-to { role: "member", permissions: u1, reputation-bonus: u0 }
+              (map-get? member-roles { member: member }))
+)
+
+(define-read-only (get-model-config (config-id uint))
+  (map-get? model-configurations { config-id: config-id })
+)
+
+(define-read-only (calculate-voting-power (voter principal))
+  (let
+    (
+      (tokens (get-token-balance voter))
+      (delegation (map-get? delegations { delegator: voter }))
+      (base-power (+ (get staked tokens) (/ (get balance tokens) u2)))
+      (reputation-bonus (/ (get reputation tokens) u10))
+    )
+    (if (and (is-some delegation) 
+             (< stacks-block-height (get expiry (unwrap-panic delegation))))
+      u0
+      (+ base-power reputation-bonus))
+  )
+)
+
+(define-read-only (get-treasury-balance)
+  (var-get treasury-balance)
+)
+
+(define-read-only (get-governance-stats)
+  {
+    proposal-count: (var-get proposal-count),
+    treasury-balance: (var-get treasury-balance),
+    total-staked: (var-get total-staked),
+    reward-pool: (var-get reward-pool),
+    quorum-threshold: (var-get quorum-threshold)
+  }
+)
+
+(define-private (update-reputation (user principal) (points uint))
+  (let
+    (
+      (current-tokens (get-token-balance user))
+      (new-reputation (+ (get reputation current-tokens) points))
+    )
+    (map-set dao-tokens { holder: user }
+      (merge current-tokens { reputation: new-reputation }))
+    (ok true)
+  )
+)
+
+(define-private (return-proposal-stake (proposal-id uint))
+  (let
+    (
+      (stake-info (unwrap! (map-get? proposal-stakes { proposal-id: proposal-id }) ERR-INVALID-PROPOSAL))
+      (proposal (unwrap! (map-get? proposals { proposal-id: proposal-id }) ERR-INVALID-PROPOSAL))
+    )
+    (if (not (get stake-returned stake-info))
+      (begin
+        (try! (as-contract (transfer-tokens (get creator proposal) (get stake-amount stake-info))))
+        (map-set proposal-stakes { proposal-id: proposal-id }
+          (merge stake-info { stake-returned: true }))
+        (ok true))
+      (ok true))
+  )
+)
+
+(define-private (distribute-model-reward (recipient principal) (amount uint))
+  (if (>= (var-get reward-pool) amount)
+    (begin
+      (var-set reward-pool (- (var-get reward-pool) amount))
+      (try! (mint-tokens recipient amount))
+      (ok amount))
+    (ok u0))
+)
