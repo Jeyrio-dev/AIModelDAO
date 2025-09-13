@@ -393,3 +393,89 @@
     (ok user-reward)
   )
 )
+
+(define-read-only (get-token-balance (holder principal))
+  (default-to { balance: u0, staked: u0, last-claim: u0, reputation: u0 }
+              (map-get? dao-tokens { holder: holder }))
+)
+
+(define-read-only (get-proposal (proposal-id uint))
+  (map-get? proposals { proposal-id: proposal-id })
+)
+
+(define-read-only (get-vote (proposal-id uint) (voter principal))
+  (map-get? votes { proposal-id: proposal-id, voter: voter })
+)
+
+(define-read-only (get-member-role (member principal))
+  (default-to { role: "member", permissions: u1, reputation-bonus: u0 }
+              (map-get? member-roles { member: member }))
+)
+
+(define-read-only (get-model-config (config-id uint))
+  (map-get? model-configurations { config-id: config-id })
+)
+
+(define-read-only (calculate-voting-power (voter principal))
+  (let
+    (
+      (tokens (get-token-balance voter))
+      (delegation (map-get? delegations { delegator: voter }))
+      (base-power (+ (get staked tokens) (/ (get balance tokens) u2)))
+      (reputation-bonus (/ (get reputation tokens) u10))
+    )
+    (if (and (is-some delegation) 
+             (< block-height (get expiry (unwrap-panic delegation))))
+      u0
+      (+ base-power reputation-bonus))
+  )
+)
+
+(define-read-only (get-treasury-balance)
+  (var-get treasury-balance)
+)
+
+(define-read-only (get-governance-stats)
+  {
+    proposal-count: (var-get proposal-count),
+    treasury-balance: (var-get treasury-balance),
+    total-staked: (var-get total-staked),
+    reward-pool: (var-get reward-pool),
+    quorum-threshold: (var-get quorum-threshold)
+  }
+)
+
+(define-private (update-reputation (user principal) (points uint))
+  (let
+    (
+      (current-tokens (get-token-balance user))
+      (new-reputation (+ (get reputation current-tokens) points))
+    )
+    (map-set dao-tokens { holder: user }
+      (merge current-tokens { reputation: new-reputation }))
+    (ok true)
+  )
+)
+
+(define-private (return-proposal-stake (proposal-id uint))
+  (let
+    (
+      (stake-info (unwrap! (map-get? proposal-stakes { proposal-id: proposal-id }) ERR-INVALID-PROPOSAL))
+      (proposal (unwrap! (map-get? proposals { proposal-id: proposal-id }) ERR-INVALID-PROPOSAL))
+    )
+    (if (not (get stake-returned stake-info))
+      (begin
+        (try! (as-contract (transfer-tokens (get creator proposal) (get stake-amount stake-info))))
+        (map-set proposal-stakes { proposal-id: proposal-id }
+          (merge stake-info { stake-returned: true })))
+      (ok true))
+  )
+)
+
+(define-private (distribute-model-reward (recipient principal) (amount uint))
+  (if (>= (var-get reward-pool) amount)
+    (begin
+      (var-set reward-pool (- (var-get reward-pool) amount))
+      (mint-tokens recipient amount))
+    (ok u0))
+)
