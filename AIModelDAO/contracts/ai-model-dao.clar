@@ -91,7 +91,7 @@
 
 (define-public (initialize)
   (begin
-    (map-set dao-tokens { holder: CONTRACT-OWNER } { balance: u1000000, staked: u0, last-claim: block-height, reputation: u100 })
+    (map-set dao-tokens { holder: CONTRACT-OWNER } { balance: u1000000, staked: u0, last-claim: stacks-block-height, reputation: u100 })
     (map-set governance-settings { setting: "min-stake" } { value: u1000 })
     (map-set governance-settings { setting: "quorum" } { value: u30 })
     (map-set governance-settings { setting: "voting-period" } { value: u1440 })
@@ -115,7 +115,7 @@
       { 
         balance: (+ current-balance amount),
         staked: (get staked (get-token-balance recipient)),
-        last-claim: block-height,
+        last-claim: stacks-block-height,
         reputation: (get reputation (get-token-balance recipient))
       })
     (ok amount)
@@ -158,7 +158,7 @@
       { 
         balance: (- current-balance amount),
         staked: (+ current-stake amount),
-        last-claim: block-height,
+        last-claim: stacks-block-height,
         reputation: (get reputation (get-token-balance tx-sender))
       })
     (var-set total-staked (+ (var-get total-staked) amount))
@@ -174,13 +174,13 @@
       (last-claim (get last-claim (get-token-balance tx-sender)))
     )
     (asserts! (>= current-stake amount) ERR-NOT-AUTHORIZED)
-    (asserts! (> (- block-height last-claim) u144) ERR-COOLDOWN-ACTIVE)
+    (asserts! (> (- stacks-block-height last-claim) u144) ERR-COOLDOWN-ACTIVE)
     (map-set dao-tokens 
       { holder: tx-sender }
       { 
         balance: (+ current-balance amount),
         staked: (- current-stake amount),
-        last-claim: block-height,
+        last-claim: stacks-block-height,
         reputation: (get reputation (get-token-balance tx-sender))
       })
     (var-set total-staked (- (var-get total-staked) amount))
@@ -210,7 +210,7 @@
         creator: tx-sender,
         votes-for: u0,
         votes-against: u0,
-        end-block: (+ block-height (var-get voting-period)),
+        end-block: (+ stacks-block-height (var-get voting-period)),
         executed: false,
         proposal-type: proposal-type,
         funding-amount: funding-amount,
@@ -236,12 +236,12 @@
       (voting-power (calculate-voting-power tx-sender))
       (has-voted (is-some (map-get? votes { proposal-id: proposal-id, voter: tx-sender })))
     )
-    (asserts! (< block-height (get end-block proposal)) ERR-VOTING-CLOSED)
+    (asserts! (< stacks-block-height (get end-block proposal)) ERR-VOTING-CLOSED)
     (asserts! (not has-voted) ERR-ALREADY-VOTED)
     (asserts! (> voting-power u0) ERR-NOT-AUTHORIZED)
     
     (map-set votes { proposal-id: proposal-id, voter: tx-sender }
-      { voted: true, vote-type: vote-for, voting-power: voting-power, timestamp: block-height })
+      { voted: true, vote-type: vote-for, voting-power: voting-power, timestamp: stacks-block-height })
     
     (if vote-for
       (map-set proposals { proposal-id: proposal-id }
@@ -249,7 +249,7 @@
       (map-set proposals { proposal-id: proposal-id }
         (merge proposal { votes-against: (+ (get votes-against proposal) voting-power) })))
     
-    (try! (update-reputation tx-sender u1))
+    (unwrap! (update-reputation tx-sender u1) ERR-NOT-AUTHORIZED)
     (ok true)
   )
 )
@@ -262,7 +262,7 @@
       (quorum-met (>= (* total-votes u100) (* (var-get total-staked) (var-get quorum-threshold))))
       (proposal-passed (> (get votes-for proposal) (get votes-against proposal)))
     )
-    (asserts! (>= block-height (get end-block proposal)) ERR-VOTING-CLOSED)
+    (asserts! (>= stacks-block-height (get end-block proposal)) ERR-VOTING-CLOSED)
     (asserts! (not (get executed proposal)) ERR-PROPOSAL-EXECUTED)
     (asserts! quorum-met ERR-INSUFFICIENT-QUORUM)
     (asserts! proposal-passed ERR-NOT-AUTHORIZED)
@@ -280,8 +280,8 @@
           true))
       true)
     
-    (try! (return-proposal-stake proposal-id))
-    (try! (update-reputation (get creator proposal) u5))
+    (unwrap! (return-proposal-stake proposal-id) ERR-NOT-AUTHORIZED)
+    (unwrap! (update-reputation (get creator proposal) u5) ERR-NOT-AUTHORIZED)
     (ok true)
   )
 )
@@ -296,7 +296,7 @@
     (asserts! (not (is-eq delegate tx-sender)) ERR-INVALID-DELEGATE)
     
     (map-set delegations { delegator: tx-sender }
-      { delegate: delegate, voting-power: voting-power, expiry: (+ block-height expiry-blocks) })
+      { delegate: delegate, voting-power: voting-power, expiry: (+ stacks-block-height expiry-blocks) })
     (ok true)
   )
 )
@@ -318,7 +318,7 @@
         creator: tx-sender
       })
     
-    (try! (update-reputation tx-sender u3))
+    (unwrap! (update-reputation tx-sender u3) ERR-NOT-AUTHORIZED)
     (ok config-id)
   )
 )
@@ -336,8 +336,9 @@
       (merge config { performance-metrics: metrics }))
     
     (if (> metrics u80)
-      (try! (distribute-model-reward (get creator config) u100))
-      (ok u0))
+      (unwrap! (distribute-model-reward (get creator config) u100) ERR-TREASURY-INSUFFICIENT)
+      u0)
+    (ok metrics)
   )
 )
 
@@ -353,7 +354,7 @@
     (map-set model-configurations { config-id: config-id }
       (merge config { active: true }))
     
-    (try! (distribute-model-reward (get creator config) u500))
+    (unwrap! (distribute-model-reward (get creator config) u500) ERR-TREASURY-INSUFFICIENT)
     (ok true)
   )
 )
@@ -425,7 +426,7 @@
       (reputation-bonus (/ (get reputation tokens) u10))
     )
     (if (and (is-some delegation) 
-             (< block-height (get expiry (unwrap-panic delegation))))
+             (< stacks-block-height (get expiry (unwrap-panic delegation))))
       u0
       (+ base-power reputation-bonus))
   )
@@ -467,7 +468,8 @@
       (begin
         (try! (as-contract (transfer-tokens (get creator proposal) (get stake-amount stake-info))))
         (map-set proposal-stakes { proposal-id: proposal-id }
-          (merge stake-info { stake-returned: true })))
+          (merge stake-info { stake-returned: true }))
+        (ok true))
       (ok true))
   )
 )
@@ -476,6 +478,7 @@
   (if (>= (var-get reward-pool) amount)
     (begin
       (var-set reward-pool (- (var-get reward-pool) amount))
-      (mint-tokens recipient amount))
+      (try! (mint-tokens recipient amount))
+      (ok amount))
     (ok u0))
 )
