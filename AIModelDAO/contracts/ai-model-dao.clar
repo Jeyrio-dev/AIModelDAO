@@ -187,3 +187,116 @@
     (ok true)
   )
 )
+
+(define-public (create-proposal (title (string-ascii 100)) (description (string-ascii 500)) 
+                              (proposal-type (string-ascii 30)) (funding-amount uint) 
+                              (target-address (optional principal)) (model-params (string-ascii 200))
+                              (priority uint))
+  (let
+    (
+      (proposal-id (+ (var-get proposal-count) u1))
+      (stake-amount (var-get min-proposal-stake))
+      (creator-balance (get balance (get-token-balance tx-sender)))
+      (creator-reputation (get reputation (get-token-balance tx-sender)))
+    )
+    (asserts! (>= creator-balance stake-amount) ERR-MIN-STAKE-REQUIRED)
+    (asserts! (>= creator-reputation u10) ERR-INSUFFICIENT-REPUTATION)
+    (asserts! (<= funding-amount (var-get treasury-balance)) ERR-TREASURY-INSUFFICIENT)
+    
+    (map-set proposals { proposal-id: proposal-id }
+      {
+        title: title,
+        description: description,
+        creator: tx-sender,
+        votes-for: u0,
+        votes-against: u0,
+        end-block: (+ block-height (var-get voting-period)),
+        executed: false,
+        proposal-type: proposal-type,
+        funding-amount: funding-amount,
+        target-address: target-address,
+        model-params: model-params,
+        priority: priority
+      })
+    
+    (map-set proposal-stakes { proposal-id: proposal-id }
+      { stake-amount: stake-amount, stake-returned: false })
+    
+    (try! (transfer-tokens (as-contract tx-sender) stake-amount))
+    (var-set proposal-count proposal-id)
+    (ok proposal-id)
+  )
+)
+
+(define-public (vote-on-proposal (proposal-id uint) (vote-for bool))
+  (let
+    (
+      (proposal (unwrap! (map-get? proposals { proposal-id: proposal-id }) ERR-INVALID-PROPOSAL))
+      (voter-tokens (get-token-balance tx-sender))
+      (voting-power (calculate-voting-power tx-sender))
+      (has-voted (is-some (map-get? votes { proposal-id: proposal-id, voter: tx-sender })))
+    )
+    (asserts! (< block-height (get end-block proposal)) ERR-VOTING-CLOSED)
+    (asserts! (not has-voted) ERR-ALREADY-VOTED)
+    (asserts! (> voting-power u0) ERR-NOT-AUTHORIZED)
+    
+    (map-set votes { proposal-id: proposal-id, voter: tx-sender }
+      { voted: true, vote-type: vote-for, voting-power: voting-power, timestamp: block-height })
+    
+    (if vote-for
+      (map-set proposals { proposal-id: proposal-id }
+        (merge proposal { votes-for: (+ (get votes-for proposal) voting-power) }))
+      (map-set proposals { proposal-id: proposal-id }
+        (merge proposal { votes-against: (+ (get votes-against proposal) voting-power) })))
+    
+    (try! (update-reputation tx-sender u1))
+    (ok true)
+  )
+)
+
+(define-public (execute-proposal (proposal-id uint))
+  (let
+    (
+      (proposal (unwrap! (map-get? proposals { proposal-id: proposal-id }) ERR-INVALID-PROPOSAL))
+      (total-votes (+ (get votes-for proposal) (get votes-against proposal)))
+      (quorum-met (>= (* total-votes u100) (* (var-get total-staked) (var-get quorum-threshold))))
+      (proposal-passed (> (get votes-for proposal) (get votes-against proposal)))
+    )
+    (asserts! (>= block-height (get end-block proposal)) ERR-VOTING-CLOSED)
+    (asserts! (not (get executed proposal)) ERR-PROPOSAL-EXECUTED)
+    (asserts! quorum-met ERR-INSUFFICIENT-QUORUM)
+    (asserts! proposal-passed ERR-NOT-AUTHORIZED)
+    
+    (map-set proposals { proposal-id: proposal-id }
+      (merge proposal { executed: true }))
+    
+    (if (> (get funding-amount proposal) u0)
+      (begin
+        (var-set treasury-balance (- (var-get treasury-balance) (get funding-amount proposal)))
+        (if (is-some (get target-address proposal))
+          (try! (as-contract (stx-transfer? (get funding-amount proposal) 
+                                         tx-sender 
+                                         (unwrap-panic (get target-address proposal)))))
+          true))
+      true)
+    
+    (try! (return-proposal-stake proposal-id))
+    (try! (update-reputation (get creator proposal) u5))
+    (ok true)
+  )
+)
+
+(define-public (delegate-voting-power (delegate principal) (expiry-blocks uint))
+  (let
+    (
+      (delegator-tokens (get-token-balance tx-sender))
+      (voting-power (+ (get staked delegator-tokens) (/ (get balance delegator-tokens) u2)))
+    )
+    (asserts! (> voting-power u0) ERR-NOT-AUTHORIZED)
+    (asserts! (not (is-eq delegate tx-sender)) ERR-INVALID-DELEGATE)
+    
+    (map-set delegations { delegator: tx-sender }
+      { delegate: delegate, voting-power: voting-power, expiry: (+ block-height expiry-blocks) })
+    (ok true)
+  )
+)
